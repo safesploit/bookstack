@@ -4,19 +4,30 @@
 # Website: https://safesploit.com/
 #
 # BookStack: https://www.bookstackapp.com/
-# Adapted from: https://github.com/blogmotion/bm-bookstack-install/
+# Adapted from: https://deviant.engineer/2017/02/bookstack-centos7/
 #
 #set -xe
-VERSION="2023-10-17"
+VERSION="2023-10-18"
 
 ### VARIABLES #######################################################################################################################
 VARWWW="/var/www"
 BOOKSTACK_DIR="${VARWWW}/BookStack"
 TMPROOTPWD="/tmp/DB_ROOT.delete"
+TMPBOOKPWD="/tmp/DB_BOOKSTACK.delete"
 REMIRPM="https://rpms.remirepo.net/enterprise/remi-release-9.rpm"
 CURRENT_IP=$(hostname -i)
 DOMAIN=$(hostname)
 blanc="\033[1;37m"; gris="\033[0;37m"; magenta="\033[0;35m"; rouge="\033[1;31m"; vert="\033[1;32m"; jaune="\033[1;33m"; bleu="\033[1;34m"; rescolor="\033[0m"
+
+# Database configuration
+DB_NAME="bookstackdb"
+DB_USER="bookstackuser"
+
+#APP configuration
+APP_URL="http://${DOMAIN}"
+APP_LANG="en"
+
+MAIL_PORT="25"  # You can change this value as needed
 
 ### Functions #######################################################################################################################
 
@@ -51,42 +62,19 @@ install_packages() {
     echo "extension=tidy" >> /etc/php.ini
 }
 
-# this can be deleted (third-party legacy)
-install_packages_remi() {
-    print_colored "${jaune}" "Packages installation ..."
-    dnf -y update
-
-    # Add REMI repo
-    dnf -y install vim
-    dnf -y install $REMIRPM
-    dnf -y module reset php
-    dnf -y module enable php:remi-8.0
-
-    if [[ $? -ne 0 ]]; then
-        print_colored "${rouge}" "ERROR on Remi RPM, please check RPM URL : $REMIRPM"
-        print_colored "${gris}" "Script aborted, please restart after fixing it"
-        exit 1
-    fi
-
-    dnf -y install epel-release # (Extra Packages for Enterprise Linux)
-    dnf -y install git unzip mariadb-server nginx php php-cli php-fpm php-json php-gd php-mysqlnd php-xml php-openssl php-tokenizer php-mbstring php-mysqlnd
-
-    dnf --enablerepo=remi install -y php80-php-tidy php80-php-json php80-php-pecl-zip
-
-    # Create symlink tidy.so and enable extension in php.ini
-    ln -s /opt/remi/php80/root/usr/lib64/php/modules/tidy.so /usr/lib64/php/modules/tidy.so
-    echo "extension=tidy" >> /etc/php.ini
-}
-
 # Configure the database
 configure_database() {
     print_colored "${jaune}" "Database installation ..."
     systemctl enable --now mariadb.service
     printf "\n n\n n\n n\n y\n y\n y\n" | mysql_secure_installation
 
+    # Generate a random bookstackpass
+    local bookstackpass=$(cat /dev/urandom | tr -cd 'A-Za-z0-9' | head -c 14)
+    echo "BookStack user:${bookstackpass}" >> $TMPBOOKPWD && cat $TMPBOOKPWD
+
     mysql --execute="
-    CREATE DATABASE IF NOT EXISTS bookstackdb DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci;
-    GRANT ALL PRIVILEGES ON bookstackdb.* TO 'bookstackuser'@'localhost' IDENTIFIED BY 'bookstackpass' WITH GRANT OPTION;
+    CREATE DATABASE IF NOT EXISTS $DB_NAME DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci;
+    GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost' IDENTIFIED BY '$bookstackpass' WITH GRANT OPTION;
     FLUSH PRIVILEGES;
     quit"
 
@@ -94,6 +82,9 @@ configure_database() {
     DB_ROOT=$(cat /dev/urandom | tr -cd 'A-Za-z0-9' | head -c 14)
     echo "MariaDB root:${DB_ROOT}" >> $TMPROOTPWD && cat $TMPROOTPWD
     mysql -e "SET PASSWORD FOR root@localhost = PASSWORD('${DB_ROOT}');FLUSH PRIVILEGES;"
+
+    # Store the generated bookstackpass globally
+    BOOKSTACK_PASS="$bookstackpass"
 }
 
 # Configure PHP-FPM
@@ -199,23 +190,22 @@ _EOF_
 inject_and_modify_app_settings() {
     cp .env.example .env
     /var/www/BookStack/.env
-    sed -i "s|APP_URL=.*$|APP_URL=http://${DOMAIN}|" .env
-    sed -i "s|^DB_DATABASE=.*$|DB_DATABASE=bookstackdb|" .env
-    sed -i "s|^DB_USERNAME=.*$|DB_USERNAME=bookstackuser|" .env
-    sed -i "s|^DB_PASSWORD=.*$|DB_PASSWORD=bookstackpass|" .env
-    sed -i "s|^MAIL_PORT=.*$|MAIL_PORT=25|" .env
 
-    #APP_LANG
-    sed -i "s|^# Application URL.*$|APP_LANG=en\n# Application URL|" .env
+    sed -i "s|APP_URL=.*$|APP_URL=${APP_URL}|" .env
+    sed -i "s|^DB_DATABASE=.*$|DB_DATABASE=$DB_NAME|" .env
+    sed -i "s|^DB_USERNAME=.*$|DB_USERNAME=$DB_USER|" .env
+    sed -i "s|^DB_PASSWORD=.*$|DB_PASSWORD=${BOOKSTACK_PASS}|" .env
+    sed -i "s|^MAIL_PORT=.*$|MAIL_PORT=${MAIL_PORT}|" .env  # Use the MAIL_PORT variable
 }
 
 exit_messages() {
     print_colored "${magenta}" " --- END OF SCRIPT (v${VERSION}) ---"
-    echo -e "\n\n"
-    echo -e "\t * 1 * ${vert}PLEASE NOTE the MariaDB password root:${DB_ROOT} ${rescolor}"
-    echo -e "\t * 2 * ${rouge}AND DELETE the file (or reboot) ${TMPROOTPWD} ${rescolor}"
-    echo -e "\t * 3 * ${bleu}Logon http://${HOSTNAME} or http://${CURRENT_IP} \n\t\t -> with admin@admin.com and 'password' ${rescolor}"
+    echo -e "\t * 1 * ${gris}Database Name: ${rouge}${DB_NAME}${gris} Database User: ${rouge}${DB_USER}${gris} Database Password: ${rouge}${BOOKSTACK_PASS}${gris}${rescolor}"
+    echo -e "\t * 2 * ${vert}PLEASE NOTE the MariaDB password root:${DB_ROOT} ${rescolor}"
+    echo -e "\t * 3 * ${rouge}AND DELETE the files (or reboot) ${TMPROOTPWD} and ${TMPBOOKPWD} ${rescolor}"
+    echo -e "\t * 4 * ${bleu}Logon http://${HOSTNAME} or http://${CURRENT_IP} \n\t\t -> with admin@admin.com and 'password' ${rescolor}"
 }
+
 
 # Install and configure BookStack
 install_bookstack() {
