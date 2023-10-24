@@ -18,6 +18,7 @@ VARWWW="/var/www"
 BOOKSTACK_DIR="${VARWWW}/BookStack"
 TMPROOTPWD="/tmp/DB_ROOT.delete"
 TMPBOOKPWD="/tmp/DB_BOOKSTACK.delete"
+PWDLEN="32"
 REMIRPM="https://rpms.remirepo.net/enterprise/remi-release-9.rpm"
 CURRENT_IP=$(hostname -i)
 DOMAIN=$(hostname)
@@ -71,10 +72,10 @@ install_packages() {
 configure_database() {
     print_colored "${jaune}" "Database installation ..."
     systemctl enable --now mariadb.service
-    printf "\n n\n n\n n\n y\n y\n y\n" | mysql_secure_installation
+    secure_mysql_installation
 
     # Generate a random bookstackpass
-    local bookstackpass=$(cat /dev/urandom | tr -cd 'A-Za-z0-9' | head -c 14)
+    local bookstackpass=$(cat /dev/urandom | tr -cd 'A-Za-z0-9' | head -c $PWDLEN)
     echo "BookStack user:${bookstackpass}" >> $TMPBOOKPWD && cat $TMPBOOKPWD
 
     mysql --execute="
@@ -84,13 +85,54 @@ configure_database() {
     quit"
 
     # Set root password
-    DB_ROOT=$(cat /dev/urandom | tr -cd 'A-Za-z0-9' | head -c 14)
+    DB_ROOT=$(cat /dev/urandom | tr -cd 'A-Za-z0-9' | head -c $PWDLEN)
     echo "MariaDB root:${DB_ROOT}" >> $TMPROOTPWD && cat $TMPROOTPWD
     mysql -e "SET PASSWORD FOR root@localhost = PASSWORD('${DB_ROOT}');FLUSH PRIVILEGES;"
 
     # Store the generated bookstackpass globally
     BOOKSTACK_PASS="$bookstackpass"
 }
+
+secure_mysql_installation() {
+    echo "Running mysql_secure_installation..."
+
+    # Step 1: Disallow root login remotely - Answer 'y' (Yes)
+    # Step 2: Remove anonymous users - Answer 'n' (No)
+    # Step 3: Remove test database and access to it - Answer 'n' (No)
+    # Step 4: Reload privilege tables now - Answer 'y' (Yes)
+    # Step 5: Change the root password - Answer 'y' (Yes)
+    # Step 6: Enter and confirm a new root password - Answer 'y' (Yes)
+    printf "\n y\n n\n n\n y\n y\n y\n" | mysql_secure_installation
+
+    echo "mysql_secure_installation completed."
+}
+
+#Untested
+optimize_database() {
+    print_colored "${jaune}" "Optimizing the BookStack database ..."
+
+    # Log in to MariaDB as root (you might need to provide root credentials here)
+    mysql -u root -p"${DB_ROOT}" <<EOF
+    USE ${DB_NAME};
+
+    -- Remove anonymous users
+    DROP USER IF EXISTS ''@'localhost';
+    DROP USER IF EXISTS ''@'${HOSTNAME}';
+
+    -- Remove remote root login
+    DROP USER IF EXISTS 'root'@'${HOSTNAME}';
+    DROP USER IF EXISTS 'root'@'${CURRENT_IP}';
+
+    -- Remove the test database
+    DROP DATABASE IF EXISTS test;
+
+    -- Reload privileges
+    FLUSH PRIVILEGES;
+EOF
+
+    print_colored "${vert}" "Database optimization completed."
+}
+
 
 # Configure PHP-FPM
 configure_php_fpm() {
@@ -102,7 +144,40 @@ configure_php_fpm() {
     sed -i "s|^user = apache.*$|user = nginx ; PHP-FPM running user|" $fpmconf
     sed -i "s|^group = apache.*$|group = nginx ; PHP-FPM running group|" $fpmconf
     sed -i "s|^php_value\[session.save_path\].*$|php_value[session.save_path] = ${VARWWW}/sessions|" $fpmconf
+    #optimize_php_fpm
 }
+
+# Optimises PHP-FPM configuration (UNTESTED)
+optimize_php_fpm() {
+    # PHP-FPM pool configuration file (adjust path if necessary)
+    php_fpm_pool_conf="/etc/php-fpm.d/www.conf"
+
+    # Adjust PHP-FPM pool settings
+    sed -i 's/^pm = dynamic/pm = ondemand/' "$php_fpm_pool_conf"
+    sed -i 's/^pm.max_children = .*/pm.max_children = 10/' "$php_fpm_pool_conf"
+    sed -i 's/^pm.start_servers = .*/pm.start_servers = 2/' "$php_fpm_pool_conf"
+    sed -i 's/^pm.min_spare_servers = .*/pm.min_spare_servers = 1/' "$php_fpm_pool_conf"
+    sed -i 's/^pm.max_spare_servers = .*/pm.max_spare_servers = 3/' "$php_fpm_pool_conf"
+
+    # Tune PHP settings
+    php_ini="/etc/php.ini"
+    sed -i 's/^memory_limit = .*/memory_limit = 256M/' "$php_ini"
+    sed -i 's/^max_execution_time = .*/max_execution_time = 60/' "$php_ini"
+    sed -i 's/^post_max_size = .*/post_max_size = 20M/' "$php_ini"
+    sed -i 's/^upload_max_filesize = .*/upload_max_filesize = 20M/' "$php_ini"
+    sed -i 's/^;date.timezone =/date.timezone = "America/New_York"/' "$php_ini"
+
+    # Enable OPCache (optional)
+    # sed -i 's/^;opcache.enable=0/opcache.enable=1/' "$php_ini"
+
+    # Security settings (customize as needed)
+    sed -i 's/^expose_php = On/expose_php = Off/' "$php_ini"
+    # Add more security settings here
+
+    # Restart PHP-FPM service to apply changes (adjust service name if necessary)
+    systemctl restart php-fpm
+}
+
 
 # Boolean Logic for configuring NGINX
 configure_nginx() {
