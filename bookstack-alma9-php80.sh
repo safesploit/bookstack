@@ -7,7 +7,11 @@
 # Adapted from: https://deviant.engineer/2017/02/bookstack-centos7/
 #
 #set -xe
-VERSION="2023-10-18"
+VERSION="2023-10-24"
+
+### SWITCH #######################################################################################################################
+CONFIGURE_NGINX_AS_HTTPS=true
+#CONFIGURE_NGINX_AS_HTTPS=false
 
 ### VARIABLES #######################################################################################################################
 VARWWW="/var/www"
@@ -24,7 +28,8 @@ DB_NAME="bookstackdb"
 DB_USER="bookstackuser"
 
 #APP configuration
-APP_URL="http://${DOMAIN}"
+#APP_URL="https://${DOMAIN}"
+
 APP_LANG="en"
 
 MAIL_PORT="25"  # You can change this value as needed
@@ -99,8 +104,25 @@ configure_php_fpm() {
     sed -i "s|^php_value\[session.save_path\].*$|php_value[session.save_path] = ${VARWWW}/sessions|" $fpmconf
 }
 
-# Configure NGINX
+# Boolean Logic for configuring NGINX
 configure_nginx() {
+    if [[ "${CONFIGURE_NGINX_AS_HTTPS}" == true ]]; then
+        configure_nginx_https
+    else
+        configure_nginx_http
+    fi
+}
+
+set_app_url() {
+    if [[ "${CONFIGURE_NGINX_AS_HTTPS}" == true ]]; then
+        APP_URL="https://${DOMAIN}"
+    else
+        APP_URL="http://${DOMAIN}"
+    fi
+}
+
+# Configure NGINX HTTP only version
+configure_nginx_http() {
     print_colored "${jaune}" "Nginx configuration ..."
     mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.BAK
 
@@ -109,29 +131,22 @@ configure_nginx() {
     worker_processes auto;
     error_log /var/log/nginx/error.log;
     pid /run/nginx.pid;
-
     include /usr/share/nginx/modules/*.conf;
-
     events {
         worker_connections 1024;
     }
-
     http {
         log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
                           '$status $body_bytes_sent "$http_referer" '
                           '"$http_user_agent" "$http_x_forwarded_for"';
-
         access_log  /var/log/nginx/access.log  main;
-
         sendfile            on;
         tcp_nopush          on;
         tcp_nodelay         on;
         keepalive_timeout   65;
         types_hash_max_size 2048;
-
         include             /etc/nginx/mime.types;
         default_type        application/octet-stream;
-
         include /etc/nginx/conf.d/*.conf;
     }
 _EOF_
@@ -139,34 +154,25 @@ _EOF_
     cat << '_EOF_' > /etc/nginx/conf.d/bookstack.conf
     server {
         listen 80;
-        
         #HTTP conf:
         #listen 443 ssl;
         #ssl_certificate /etc/pki/tls/blogmotion/monserveur.crt;
         #ssl_certificate_key /etc/pki/tls/blogmotion/monserveur.key;
         #ssl_protocols TLSv1.2;
         #ssl_prefer_server_ciphers on;
-
         server_name _;
-
         root /var/www/BookStack/public;
-
         access_log  /var/log/nginx/bookstack_access.log;
         error_log  /var/log/nginx/bookstack_error.log;
-
         client_max_body_size 1G;
         fastcgi_buffers 64 4K;
-
         index  index.php;
-
         location / {
             try_files $uri $uri/ /index.php?$query_string;
         }
-
         location ~ ^/(?:\.htaccess|data|config|db_structure\.xml|README) {
             deny all;
         }
-
         location ~ \.php(?:$|/) {
             fastcgi_split_path_info ^(.+\.php)(/.+)$;
             include fastcgi_params;
@@ -174,7 +180,6 @@ _EOF_
             fastcgi_param PATH_INFO $fastcgi_path_info;
             fastcgi_pass unix:/var/run/php-fpm.sock;
         }
-
         location ~* \.(?:jpg|jpeg|gif|bmp|ico|png|css|js|swf)$ {
             expires 30d;
             access_log off;
@@ -187,6 +192,100 @@ _EOF_
     systemctl enable --now php-fpm.service
 }
 
+
+
+# Function to configure NGINX with security measures (HTTPS)
+configure_nginx_https() {
+    generate_self_signed_certificate
+
+    print_colored "${jaune}" "Nginx configuration ..."
+    mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.BAK
+
+    cat << '_EOF_' > /etc/nginx/nginx.conf
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log;
+    pid /run/nginx.pid;
+    include /usr/share/nginx/modules/*.conf;
+    events {
+        worker_connections 1024;
+    }
+    http {
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for"';
+        access_log  /var/log/nginx/access.log  main;
+        sendfile            on;
+        tcp_nopush          on;
+        tcp_nodelay         on;
+        keepalive_timeout   65;
+        types_hash_max_size 2048;
+        include             /etc/nginx/mime.types;
+        default_type        application/octet-stream;
+        include /etc/nginx/conf.d/*.conf;
+    }
+_EOF_
+
+    cat << '_EOF_' > /etc/nginx/conf.d/bookstack_https.conf
+    server {
+        listen 443 ssl;
+        ssl_certificate /etc/nginx/ssl/nginx.crt;
+        ssl_certificate_key /etc/nginx/ssl/nginx.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384';
+        ssl_prefer_server_ciphers off;
+        ssl_session_timeout 1d;
+        server_name _;
+
+        root /var/www/BookStack/public;
+        access_log  /var/log/nginx/bookstack_access.log;
+        error_log  /var/log/nginx/bookstack_error.log;
+        client_max_body_size 1G;
+        fastcgi_buffers 64 4K;
+        index  index.php;
+        location / {
+            try_files $uri $uri/ /index.php?$query_string;
+        }
+        location ~ ^/(?:\.htaccess|data|config|db_structure\.xml|README) {
+            deny all;
+        }
+        location ~ \.php(?:$|/) {
+            fastcgi_split_path_info ^(.+\.php)(/.+)$;
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            fastcgi_param PATH_INFO $fastcgi_path_info;
+            fastcgi_pass unix:/var/run/php-fpm.sock;
+        }
+        location ~* \.(?:jpg|jpeg|gif|bmp|ico|png|css|js|swf)$ {
+            expires 30d;
+            access_log off;
+        }
+    }
+_EOF_
+
+    # Enable and start services
+    systemctl enable --now nginx.service
+    systemctl enable --now php-fpm.service
+}
+
+
+
+# Generate a self-signed HTTPS certificate
+generate_self_signed_certificate() {
+    # Check if the certificate files already exist
+    if [ -f "/etc/nginx/ssl/nginx.crt" ] && [ -f "/etc/nginx/ssl/nginx.key" ]; then
+        print_colored "${jaune}" "Using existing SSL certificate."
+    else
+        print_colored "${jaune}" "Generating a self-signed SSL certificate..."
+        mkdir -p /etc/nginx/ssl
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/nginx/ssl/nginx.key -out /etc/nginx/ssl/nginx.crt -subj "/C=US/ST=State/L=City/O=Organization/CN=localhost"
+        chmod 600 /etc/nginx/ssl/nginx.key
+        chmod 644 /etc/nginx/ssl/nginx.crt
+    fi
+}
+
+
+# Modify settings for Bookstack .env
 inject_and_modify_app_settings() {
     cp .env.example .env
     /var/www/BookStack/.env
@@ -203,7 +302,7 @@ exit_messages() {
     echo -e "\t * 1 * ${gris}Database Name: ${rouge}${DB_NAME}${gris} Database User: ${rouge}${DB_USER}${gris} Database Password: ${rouge}${BOOKSTACK_PASS}${gris}${rescolor}"
     echo -e "\t * 2 * ${vert}PLEASE NOTE the MariaDB password root:${DB_ROOT} ${rescolor}"
     echo -e "\t * 3 * ${rouge}AND DELETE the files (or reboot) ${TMPROOTPWD} and ${TMPBOOKPWD} ${rescolor}"
-    echo -e "\t * 4 * ${bleu}Logon http://${HOSTNAME} or http://${CURRENT_IP} \n\t\t -> with admin@admin.com and 'password' ${rescolor}"
+    echo -e "\t * 4 * ${bleu}Logon ${APP_URL} or http://${CURRENT_IP} \n\t\t -> with admin@admin.com and 'password' ${rescolor}"
 }
 
 
@@ -252,6 +351,7 @@ print_colored "${rescolor}" "\n\n"
 sleep 3
 
 # Execute functions
+set_app_url
 configure_security
 install_packages
 configure_database
